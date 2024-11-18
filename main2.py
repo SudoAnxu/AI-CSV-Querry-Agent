@@ -12,9 +12,8 @@ from groq import Groq
 logging.basicConfig(level=logging.DEBUG)
 
 # Configuration
-os.environ["GROQ_API_KEY"] = "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"
+
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-SERPAPI_KEY = "b5371d2b326d0cb17d3cc54202d32fd3ba3f44bbfad1c65df9fbb93f5c88c014"
 
 # Streamlit app
 st.title("Google Sheets & Groq API Integration")
