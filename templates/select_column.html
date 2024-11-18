@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Select Column</title>
+</head>
+<body>
+    <h2>Select the Main Column and Define Prompt</h2>
+
+    <!-- Display preview of uploaded data -->
+    <div>
+        <h3>Data Preview:</h3>
+        {{ preview|safe }}
+    </div>
+
+    <!-- Form for selecting main column and entering prompt -->
+    <form action="{{ url_for('select_column') }}" method="POST">
+        <label for="selected_column">Choose a Column:</label>
+        <select name="selected_column" id="selected_column" required>
+            {% for column in columns %}
+                <option value="{{ column }}">{{ column }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="user_prompt">Enter Prompt:</label>
+        <input type="text" id="user_prompt" name="user_prompt" placeholder="e.g., Get me the email address of {company}" required>
+
+        <button type="submit">Submit</button>
+    </form>
+</body>
+</html>
