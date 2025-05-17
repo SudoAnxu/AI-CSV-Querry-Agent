@@ -3,7 +3,7 @@
 A Streamlit app for natural language processing and AI-assisted code generation on your CSV/Excel datasets! With support for chemistry, science, healthcare, or any tabular data.
 Click the badge below to launch a free, temporary workspace and try the app online (no local setup needed):
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_cloud_tutorial.svg)](https://share.streamlit.io/launch?repository=https://github.com/your-github-username/your-repo-name)
+[![Open in Streamlit]](https://ai-csv-querry-agent-mqfukt9xwr4hqhjnqhudn5.streamlit.app/)
 ## Features
 
 - Upload your own CSV or Excel files
