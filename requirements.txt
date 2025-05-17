@@ -1,0 +1,9 @@
+streamlit
+pandas
+matplotlib
+torch
+sentence-transformers
+rapidfuzz
+langchain-groq
+langchain-core
+xlsxwriter
