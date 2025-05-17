@@ -1,257 +1,276 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for, send_file
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from groq import Groq
+import streamlit as st
 import pandas as pd
-import requests
-import os
+import matplotlib.pyplot as plt
+from io import BytesIO
+from sentence_transformers import SentenceTransformer, util
+from rapidfuzz import process, fuzz
 import re
-import ast
-import logging
-logging.basicConfig(level=logging.DEBUG)
-app = Flask(__name__)
+import concurrent.futures
 
-# Groq API configuration
-os.environ["GROQ_API_KEY"] = "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"
-GROQ_API_KEY = "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"
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"  # Replace with the correct endpoint URL
-client = Groq(
-    api_key="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",  # Or set your API key directly
-)
-# Google Sheets and Search API configuration
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SHEETS_CREDENTIALS = "token.json"
-SERPAPI_KEY = "b5371d2b326d0cb17d3cc54202d32fd3ba3f44bbfad1c65df9fbb93f5c88c014"
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage
 
-# Placeholder for storing uploaded data
-uploaded_data = None
-
-# Google Sheets data retrieval function
-def fetch_google_sheet_data(sheet_id, service_account_path):
+# --------- CODE CLEANER ------------ #
+def extract_executable_code(llm_output: str) -> str:
     """
-    Fetches data from a Google Sheet using its ID and a service account JSON file.
-
-    Args:
-        sheet_id (str): The Google Sheet ID.
-        service_account_path (str): The path to the service account JSON file.
-
-    Returns:
-        pd.DataFrame: A DataFrame containing the data from the Google Sheet.
+    Extract only executable Python code from LLM output.
+    Removes imports, markdown fences, and explanations.
     """
-    import gspread
-    from google.oauth2.service_account import Credentials
+    code = re.sub(r"```(\w+)?", "", llm_output)     # Remove markdown code fences
+    code = re.sub(r"```", "", code)
+    code_lines = []
+    for line in code.splitlines():
+        l = line.strip()
+        if l.lower().startswith("this code") or l.lower().startswith("the code"):         # Stop at explanations
+            break
+        if not l:         # Skip blank lines
+            continue
+        if l.startswith("import "):         # Remove imports
+            continue
+        code_lines.append(line)
+    return "\n".join(code_lines)
+# ----------------------------------- #
 
-    # Define the required scope for Google Sheets API
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
-    # Authenticate with the service account
-    creds = Credentials.from_service_account_file(service_account_path, scopes=scope)
-    
-    # Connect to the Google Sheets API
-    client = gspread.authorize(creds)
-    
-    # Open the Google Sheet by ID
-    sheet = client.open_by_key(sheet_id)
-    
-    # Access the first worksheet
-    worksheet = sheet.get_worksheet(0)
-    
-    # Fetch all data from the worksheet
-    data = worksheet.get_all_values()
+# ------------- SETUP ---------------
+st.set_page_config(page_title="Flexible NLProc DataFrame Agent", layout="wide")
 
-    # Convert the data to a Pandas DataFrame
-    df = pd.DataFrame(data)
-    
-    # Use the first row as column headers if available
-    if not df.empty:
-        df.columns = df.iloc[0]  # Set the first row as the header
-        df = df[1:]  # Drop the first row from the data
-    
-    return df
-
-
-@app.route('/')
-def index():
-    return '''
-        <form action="/upload_csv" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".csv">
-            <input type="submit" value="Upload CSV">
-        </form>
-        <form action="/connect_google_sheet" method="post">
-            <input type="text" name="sheet_id" placeholder="Enter Google Sheet ID">
-            <input type="submit" value="Connect Google Sheet">
-        </form>
-    '''
-
-@app.route('/upload_csv', methods=['POST'])
-def upload_csv():
-    global uploaded_data
-    file = request.files['file']
-    if file:
-        uploaded_data = pd.read_csv(file)
-        return redirect(url_for('select_column'))
-    else:
-        return "File upload failed."
-
-@app.route('/connect_google_sheet', methods=['POST'])
-def connect_google_sheet():
-    global uploaded_data
-    sheet_id = request.form['sheet_id']
-    service_account_path = "service-account.json"
-    try:
-        uploaded_data = fetch_google_sheet_data(sheet_id, service_account_path)
-        if not uploaded_data.empty:
-            return redirect(url_for('select_column'))
-        else:
-            return "Google Sheet is empty or could not be fetched.", 400
-    except Exception as e:
-        logging.exception("Failed to connect to Google Sheet.")
-        data = fetch_google_sheet_data(sheet_id, service_account_path)
-        print(data)
-        return f"Google Sheet connection failed: {str(e)}", 500
-
-
-@app.route('/select_column', methods=['GET', 'POST'])
-def select_column():
-    if request.method == 'POST':
-        selected_column = request.form['selected_column']
-        user_prompt = request.form['user_prompt']
-        return redirect(url_for('process_data', selected_column=selected_column, user_prompt=user_prompt,uploaded_data=uploaded_data))
-    
-    columns = uploaded_data.columns.tolist()
-    preview = uploaded_data.head().to_html()
-    return render_template('select_column.html', columns=columns, preview=preview)
-
-@app.route('/process_data')
-def process_data():
-    selected_column = request.args.get('selected_column')
-    user_prompt = request.args.get('user_prompt')
-    
-    results = []
-    for entity in uploaded_data[selected_column].unique():
-        prompt = user_prompt.replace("{company}", entity)
-        search_results = search_entity(entity,user_prompt)
-        extracted_info = extract_with_groq(entity, search_results, user_prompt)
-        # print("extracted_info after:" ,extracted_info)
-        extracted_info = ast.literal_eval(extracted_info)
-        entity_info = {f"{selected_column}": entity}
-        entity_info.update(extracted_info)
-        results.append(entity_info)
-    print(results)
-    results_df = pd.DataFrame(results)
-    combined_df = pd.merge(uploaded_data, results_df, on=f"{selected_column}", how="inner")
-    combined_df.to_csv("results.csv", index=False)
-    
-    return redirect(url_for('download_results'))
-
-# Route to download results.csv
-@app.route('/download_results')
-def download_results():
-    return send_file("results.csv", as_attachment=True)
-
-# Search function using SerpAPI
-def search_entity(entity,user_prompt):
-    response = requests.get(
-        "https://serpapi.com/search",
-        params={"q": f"{user_prompt} {entity}", "api_key": SERPAPI_KEY, "location": "United States"}
+@st.cache_resource
+def load_llm():
+    api_key = st.secrets["GROQ_API_KEY"]  
+    return ChatGroq(
+        model="llama-3.1-8b-instant",
+        temperature=0.0,
+        max_tokens=256,
+        timeout=None,
+        max_retries=2,
+        api_key=api_key
     )
-    search_data = response.json()
-    results = [
-        {"title": result.get("title"), "snippet": result.get("snippet"), "link": result.get("link")}
-        for result in search_data.get("organic_results", [])
-    ]
-    # print(results)
-    return results
+llm = load_llm()
 
-# Groq LLM extraction function
-def extract_with_groq(entity, search_results,user_prompt):
-    context = "\n".join([f"Title: {res['title']}, Snippet: {res['snippet']}" for res in search_results])
-    prompt = f"{user_prompt}:\n{context}"
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+embedder = load_embedder()
 
-    # Groq API call for chat completion
-    # try:
-    chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama3-8b-8192",  # Choose the appropriate model
-        )
+# ------------- INTENT/ACTION TEMPLATES ---------------
+ACTION_TEMPLATES = [
+    "add column",
+    "remove column",
+    "set cell value",
+    "add row",
+    "remove row",
+    "plot column",
+    "plot ratio column by group",
+    "calculate ratio between two columns",
+    "sum two columns",
+    "average of column grouped by another column",
+]
 
-        # Get the response from the model
-    
-    contextual_info= chat_completion.choices[0].message.content
-    print("contextual",contextual_info)
-    dict_prompt = """
+ACTION_TEMPLATES_EMB = embedder.encode(ACTION_TEMPLATES)
 
-Please analyze the response text below and extract specific information based on the requirements provided in the initial prompt. Structure the information into a clean dictionary, ensuring that only relevant keys and values are included.
-Please analyze the provided response text and extract only the relevant information required by the initial prompt. Structure the extracted data in a dictionary format, where the key corresponds exactly to the specific prompt requirement, and the value is the relevant information from the response.
+# ------------- GUARDRAILS ---------------
+FORBIDDEN = ['os.', 'sys.', '__', 'open(', 'eval(', 'exec(', 'subprocess', 'shutil', 'exit(']
 
-Guidelines:
-Key Consistency: Ensure that the key in the dictionary directly matches the requirement in the prompt. Avoid variations or added detail in the key name, such as "CEO_name" when it should simply be "CEO". The key should be as precise as the prompt’s requirement (e.g., if the prompt asks for the CEO, the key should be "CEO").
+def is_code_safe(code: str) -> bool:
+    """Guardrails: Not exhaustive, but blocks most dangerous code."""
+    for pat in FORBIDDEN:
+        if pat in code:
+            return False
+    return True
 
-Relevant Data Only: Only include the specific data requested in the prompt. Do not include extra or unnecessary details. If the prompt asks for "CEO", the response should include only the CEO's name with the key "CEO".
+# ------------- COLUMN MATCHING (fuzzy/embedding) ---------------
+def best_column_match(user_token, columns, threshold=0.7):
+    if not columns:
+        return None
+    user_emb = embedder.encode([user_token])
+    col_embs = embedder.encode(columns)
+    cos = util.cos_sim(user_emb, col_embs)[0]
+    max_idx = cos.argmax().item()
+    if cos[max_idx] > threshold:
+        return columns[max_idx]
+    match, score, _ = process.extractOne(user_token, columns, scorer=fuzz.WRatio)
+    return match if score > 80 else None
 
-Handling Missing Information: If the requested information is missing, mark it explicitly as "Not found". Ensure this is consistent across all responses.
+def extract_relevant_columns(user_cmd, columns):
+    tokens = re.findall(r'\b\w+\b', user_cmd)
+    found = []
+    for tok in tokens:
+        cand = best_column_match(tok, columns)
+        if cand and cand not in found:
+            found.append(cand)
+    return found
 
-Flexibility in Labeling: The model should decide the most accurate label for the key based on the context of the response. The key should be aligned with the most relevant and common term used for the entity in the response.
+# ------------- INTENT/STRUCTURED MAPPING ---------------
+def extract_intent_and_slots(user_cmd, columns):
+    cmd_emb = embedder.encode([user_cmd])
+    sim = util.cos_sim(cmd_emb, ACTION_TEMPLATES_EMB)[0]
+    action_idx = sim.argmax().item()
+    best_action = ACTION_TEMPLATES[action_idx]
+    op = None
+    for o in ["ratio", "sum", "average", "mean", "median"]:
+        if o in user_cmd.lower():
+            op = o
+            break
+    plot_type = None
+    for p in ["plot", "histogram", "bar", "pie", "line", "box"]:
+        if p in user_cmd.lower():
+            plot_type = p
+            break
+    group_by = None
+    match = re.search(r"(by|against|grouped by|vs)\s+([\w ]+)", user_cmd.lower())
+    if match:
+        group_by = best_column_match(match[2].strip(), columns)
 
-Output Structure: The final output should be in the form of a dictionary with the key-value pair. Only return the dictionary with the relevant keys. The dictionary should be clean, well-structured, and precise, with no extraneous text or formatting.
-- The dictionary should contain only the keys directly related to the prompt's requirements. If a specific piece of information is not found in the response, the value should be marked as "Not found".
-- The dictionary must be formatted as follows:
- 
- {
-     "only_relevant_key_from_prompt_requirement": "value_from_response"
- }
- 
- For example:
-If the context of the prompt is "Find me the Email of the company", the expected output would look like:
-{
-    "email": "Not found"
+    col_list = extract_relevant_columns(user_cmd, columns)
+    new_col = None
+    m = re.search(r"(?:as|named|call(ed)?|new column named)\s*([\w\d_ ]+)", user_cmd)
+    if m:
+        new_col = m.group(2).strip()
+
+    return {
+        "action": best_action,
+        "columns": col_list[:3],  # up to 3
+        "operation": op,
+        "plot_type": plot_type,
+        "new_column": new_col,
+        "group_by": group_by,
+        "raw": user_cmd
     }
 
+# ------------- LLM CODEGEN WITH TIMEOUT ---------------
+def codegen_prompt_from_structured(struct, columns):
+    schema = f"DataFrame columns: {columns}\n"
 
-Return only after making into dictionary, ensuring no additional text, explanation, or formatting.
+    instruction = f"Action: {struct['action']}; "
+    if struct["operation"]:
+        instruction += f"Operation: {struct['operation']}; "
+    if struct["columns"]:
+        instruction += f"Columns: {struct['columns']}; "
+    if struct["new_column"]:
+        instruction += f"New column: {struct['new_column']}; "
+    if struct["plot_type"]:
+        instruction += f"Plot: {struct['plot_type']}; "
+    if struct["group_by"]:
+        instruction += f"Group by: {struct['group_by']}; "
+    instruction += (
+        "USE MINIMUM NEEDED OPTIMUM CODE"
+        "If the user asks for a comparison or a specific value, "
+        "If the user mentions a filter then filter DataFrame to that entity before calculating IF NEEDED."
+        "If the user asks for a specific task DO NOT HALLUCINATE OR DO EXTRA TASK do the task as instructed AS IT IS."
+        "If the INSTRUCTION is CONCISE make the CODE CONCISE too NO REDUNDANT HALLUCINATIONS. "
+        f"Only OPERATE on PRESENT COLUMNS: {schema}. IF USER DO NOT MENTION Do not add UI/input unless asked."
+        "compute and display the result using st.write(), do NOT add a new column unless specifically requested."
+    )
+    prompt = (
+    schema + instruction + f"DataFrame columns: {columns}\n"
+    "You are writing code for Streamlit with an ALREADY LOADED DataFrame `df`.\n"
+    "DO NOT use any import statements. DO NOT define a new DataFrame.\n"
+    "For statistics like mean, median, or sum, compute ONLY on the correctly filtered subset and display the result using st.write().\n"
+    "For plots, use only plt and show with st.pyplot(plt.gcf()) and make sure to USE CORRECT ARGUMENTS."
+    f"# {instruction}\n"
+    "User question: {}\n"
+    ).format(struct['raw'])
+    return prompt
 
-"""
-    prompt_2 = f"{dict_prompt}:\n{contextual_info}"
-    chat_completion_2 = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt_2,
-                }
-            ],
-            model="llama3-8b-8192",  # Choose the appropriate model
-        )
-    extracted_info_1= chat_completion_2.choices[0].message.content
-    print("extracted info:",extracted_info_1)
-    # pattern = r"```(.*?)```"
-    # cleaned_info = extracted_info_1.strip()
+def get_code_from_llm(prompt):
+    result = llm.invoke([HumanMessage(content=prompt)])
+    code = result.content.strip("` \n")
+    if code.lower().startswith("python"):
+        code = code[len("python"):].lstrip()
+    return code
 
-# Remove any leading/trailing context that is not part of the dictionary (if necessary)
-    # cleaned_info = re.sub(r'^.*\{', '{', cleaned_info)  # Ensures we start at the opening curly brace
-    # cleaned_info = re.sub(r'\}.*$', '}', cleaned_info)  # Ensures we end at the closing curly brace
-    pattern1 = r"\{(.*?)\}"
-    cleaned_info = ((re.search(pattern1, extracted_info_1, re.DOTALL)).group(0))
-    # {pattern1 = r"\{(.*?)\}"
-    # match1 = re.search(pattern1, extracted_info_1, re.DOTALL)
-    
-    print("clened:",cleaned_info)
-    
-    # return extracted_info}
-    return cleaned_info
+def get_code_from_llm_with_timeout(prompt, timeout_sec=15):
+    code = None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(get_code_from_llm, prompt)
+        try:
+            code = future.result(timeout=timeout_sec)
+        except concurrent.futures.TimeoutError:
+            pass
+    return code
 
-    
-    # except Exception as e:
-    #     print(f"Error during Groq API request: {e}")
-    #     return "Error extracting info"
+# ------------- STREAMLIT RUN LOOP ---------------
+uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+if uploaded_file:
+    if uploaded_file.name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    df.columns = df.columns.str.strip()
+    st.session_state.df = df
+    columns = list(df.columns)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    st.dataframe(df)
+    user_cmd = st.text_area("Ask your question or give a command (freeform, natural language):", height=90)
+    code_to_run = None
+    safe_to_run = False
+
+    if user_cmd:
+        # --- Structured intent+slots extraction ---
+        struct = extract_intent_and_slots(user_cmd, columns)
+
+        # --- Template match (instant, if possible) ---
+        if struct["action"] == "remove column" and struct["columns"]:
+            code_to_run = f"df = df.drop('{struct['columns'][0]}', axis=1)"
+            safe_to_run = True
+        else:
+            # --- LLM fallback: time-limited codegen ---
+            prompt = codegen_prompt_from_structured(struct, columns)
+            with st.spinner("⏳ Trying to generate code with AI agent. (Up to 15 seconds)..."):
+                code_to_run = get_code_from_llm_with_timeout(prompt, timeout_sec=15)
+            if code_to_run is None or not code_to_run.strip():
+                st.error("⚠️ The agent could not produce code in time. Please try a simpler step or rephrase.")
+            else:
+                safe_to_run = is_code_safe(code_to_run)
+                if not safe_to_run:
+                    st.error("🚨 LLM attempted unsafe code (guardrails blocked execution).")
+                cleaned_code = extract_executable_code(code_to_run)
+                st.markdown(f"**Generated code:**\n```python\n{cleaned_code}\n```")
+
+        # ----------- Execute if safe -----------
+        if safe_to_run and code_to_run:
+            try:
+                exec_env = {'df': df, 'pd': pd, 'plt': plt, 'st': st}
+                cleaned_code = extract_executable_code(code_to_run)
+                exec(cleaned_code, exec_env)
+                df = exec_env['df']
+                st.session_state.df = df
+                st.success("✅ Operation performed!")
+                if 'plt' in cleaned_code or 'plot' in cleaned_code:
+                    st.pyplot(plt.gcf())
+                    plt.clf()
+            except Exception as e:
+                st.error(f"❌ Code execution error: {e}")
+
+        st.dataframe(df, use_container_width=True)
+
+        # --- If nothing could run, prompt user guidance ---
+        if (not code_to_run or not safe_to_run):
+            st.warning(
+                f"⚠️ I couldn't confidently interpret or execute your request.\n"
+                f"Please break down your question into a simpler, single-step action.\n\n"
+                f"Here are your current column names:\n\n"
+                f"`{columns}`"
+            )
+
+    st.markdown("---")
+    st.subheader("Download updated data")
+    file_format = st.selectbox("Choose format:", ["CSV", "Excel"])
+    if st.button("Download"):
+        if file_format == "CSV":
+            csv_data = st.session_state.df.to_csv(index=False).encode('utf-8')
+            st.download_button("📤 Download CSV", data=csv_data, file_name="updated_data.csv", mime="text/csv")
+        else:
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                st.session_state.df.to_excel(writer, index=False)
+                writer.save()
+            st.download_button(
+                "📤 Download Excel",
+                data=output.getvalue(),
+                file_name="updated_data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+else:
+    st.info("📁 Please upload a CSV or Excel file to get started.")
