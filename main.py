@@ -196,7 +196,7 @@ if uploaded_file:
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
-    df.columns = df.columns.str.strip()
+    df.columns = [str(col).strip() for col in df.columns]
     st.session_state.df = df
     columns = list(df.columns)
 
