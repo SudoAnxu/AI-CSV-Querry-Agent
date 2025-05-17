@@ -1,7 +1,8 @@
-streamlit
 pandas
-matplotlib
+openpyxl
 torch
+streamlit
+matplotlib
 sentence-transformers
 rapidfuzz
 langchain-groq
