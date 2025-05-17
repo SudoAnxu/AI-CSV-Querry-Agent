@@ -1,4 +1,4 @@
-# Flexible NLProc DataFrame Agent
+# AI CSV Query and Manipulation Agent
 
 A Streamlit app for natural language processing and AI-assisted code generation on your CSV/Excel datasets! With support for chemistry, science, healthcare, or any tabular data.
 Click the badge below to launch a free, temporary workspace and try the app online (no local setup needed):
