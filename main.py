@@ -38,7 +38,7 @@ st.set_page_config(page_title="Flexible NLProc DataFrame Agent", layout="wide")
 def load_llm():
     api_key = st.secrets["GROQ_API_KEY"]  
     return ChatGroq(
-        model="llama-3.1-8b-instant",
+        model="llama-3.3-70b-versatile",
         temperature=0.0,
         max_tokens=256,
         timeout=None,
