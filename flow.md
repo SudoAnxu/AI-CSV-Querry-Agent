@@ -30,7 +30,8 @@ flowchart TD
 
 ## Proposed Agentic Framework Architecture
 
-i want you to see the current ode struture and suggest e how i can add more features o it ad transformit into a proper web app with agenbtc framewrok with agents and superviser and ui betteer , recomenneation, chyarting style and all```mermaid
+i want you to see the current ode struture and suggest e how i can add more features o it ad transformit into a proper web app with agenbtc framewrok with agents and superviser and ui betteer , recomenneation, chyarting style and all
+```mermaid
 flowchart TD
     A[User Uploads CSV/Excel] --> B[Data Profiling Agent]
     B --> C[Data Quality Assessment]
